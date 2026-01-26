@@ -1,3 +1,43 @@
+[project]
+name = "Noah"
+version = "0.1.0"
+description = "Research on DINOv3"
+readme = "ReadMe.md"
+requires-python = ">=3.10"
+dependencies = [
+    "ftfy",
+    "fvcore>=0.1.5.post20221221",
+    "matplotlib>=3.10.8",
+    "numpy>=2.2.6",
+    "nvidia-cusolver-cu12==11.7.3.90",
+    "omegaconf",
+    "opencv-python-headless>=4.13.0.90",
+    "pandas>=2.3.3",
+    "pillow>=12.1.0",
+    "ptflops>=0.7.5",
+    "regex",
+    "scikit-learn",
+    "some-package>=0.1",
+    "submitit",
+    "termcolor",
+    "torch",
+    "torchmetrics",
+    "torchvision",
+    "tqdm>=4.67.1",
+    "transformers>=4.57.6",
+]
+
+[tool.uv]
+index-url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+extra-index-url = [
+    "https://pypi.org/simple",
+    "https://your-private-repo.com/simple"
+]
+
+[[tool.uv.index]]
+url = "https://pypi.tuna.tsinghua.edu.cn/simple"
+default = true
+
 [tool.mypy]
 python_version = "3.11"
 ignore_missing_imports = true
