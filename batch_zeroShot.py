@@ -7,6 +7,14 @@ import torchvision.transforms as TVT
 import torch.nn.functional as F
 import gc
 
+# 1. 在类外部定义官方推荐的 80 个模板（精简版）
+PROMPT_TEMPLATES = [
+    "a photo of a {}.", "a rendering of a {}.", "a cropped photo of the {}.",
+    "the photo of a {}.", "a photo of my {}.", "a photo of the cool {}.",
+    "a close-up photo of a {}.", "a bright photo of the {}.",
+    "a dark photo of the {}.", "a blurry photo of the {}."
+]
+
 class GolfCourseAnalyzer:
     def __init__(self, repo_dir, model_name, backbone_w, dinotxt_w, labels):
         self.device = "cuda" if torch.cuda.is_available() else "cpu"
@@ -36,36 +44,49 @@ class GolfCourseAnalyzer:
         self.text_features = self._prepare_text_features()
         print("✅ 分析器初始化完成，准备开始高尔夫球场评估。")
 
+    # 2. 修改类内部的特征准备函数
     @torch.no_grad()
     def _prepare_text_features(self):
-        tokens = self.tokenizer.tokenize(self.labels).to(self.device)
-        # 修复 FutureWarning: 使用新的 autocast 写法
-        with torch.amp.autocast('cuda'): 
-            features = self.model.encode_text(tokens)
-            features = features[:, features.shape[1]//2:]
-            features = F.normalize(features, p=2, dim=-1) 
-        return features
+        text_feats = []
+        for class_name in self.labels:
+            # 对每个类别，生成多个提示词
+            texts = [template.format(class_name) for template in PROMPT_TEMPLATES]
+            tokens = self.tokenizer.tokenize(texts).to(self.device)
+        
+            with torch.amp.autocast('cuda'):
+                # 提取 2048 维特征
+                feats = self.model.encode_text(tokens) 
+                # 官方切片：取后半部分对齐 Patch
+                feats = feats[:, feats.shape[1] // 2 :] 
+                # 归一化并取平均值 (Ensemble)
+                feats = F.normalize(feats, p=2, dim=-1)
+                feats = feats.mean(dim=0) 
+                # 再次归一化得到最终类中心
+                feats = F.normalize(feats, p=2, dim=-1)
+                text_feats.append(feats)
+            
+        return torch.stack(text_feats) # [num_classes, 1024]
 
+    # 3. 修改推理函数，加入 Logit Scale
     @torch.no_grad()
     def analyze_image(self, img_path):
         img_pil = Image.open(img_path).convert("RGB")
         img_tensor = self.transform(img_pil).unsqueeze(0).to(self.device).half()
 
         with torch.amp.autocast('cuda'):
-            # 1. 使用官方推荐的方法获取图像 patch tokens
-            # 返回: cls_tokens, register_tokens, patch_tokens
             _, _, patch_tokens = self.model.visual_model.get_class_and_patch_tokens(img_tensor)
-            
-            # 2. 对 patch 特征进行归一化
-            patch_tokens = F.normalize(patch_tokens, p=2, dim=-1) # [1, 196, 1024]
-            
-            # 3. 计算余弦相似度
-            # 矩阵乘法：[196, 1024] @ [1024, num_labels]
+            patch_tokens = F.normalize(patch_tokens, p=2, dim=-1)
+        
+            # 计算相似度
             similarity = patch_tokens.squeeze(0) @ self.text_features.T
-            
-            # 4. 生成 14x14 的 Mask
+        
+            # --- 核心改进：手动增加对比度 (Logit Scaling) ---
+            # 如果模型有 logit_scale 就用模型自带的，没有就手动设为 20.0
+            scale = getattr(self.model, 'logit_scale', torch.tensor(20.0)).exp().item()
+            similarity = similarity * 20.0 # 强制放大差异，让 argmax 更果断
+        
             mask = similarity.argmax(dim=-1).reshape(14, 14).cpu().numpy()
-            
+        
         return mask, np.array(img_pil)
 
     def save_result(self, mask, original_img, save_path):
