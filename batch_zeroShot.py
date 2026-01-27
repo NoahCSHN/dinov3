@@ -2,149 +2,124 @@ import torch
 import os
 import cv2
 import numpy as np
-import gc
 import torch.nn.functional as F
 from PIL import Image
 import torchvision.transforms as TVT
 from tqdm import tqdm
 
-# ================= 配置区 =================
+# ================= 决策配置区 =================
 CONFIG = {
     "repo_dir": "/home/wayrobo/0_code/dinov3",
     "model_name": "dinov3_vitl16_dinotxt_tet1280d20h24l",
     "backbone_w": "/home/wayrobo/0_code/dinov3/pretrained/dinov3_vitl16_pretrain_lvd1689m-8aa4cbdd.pth",
     "dinotxt_w": "/home/wayrobo/0_code/dinov3/pretrained/dinov3_vitl16_dinotxt_vision_head_and_text_encoder-a442d8f5.pth",
     "input_pics": "/home/wayrobo/0_code/dinov3/dataset/dinov3_test",
-    "output_dir": "./golf_final_results_fp32",
-    # 采用简单颜色标签进行感知测试
-    "queries": ["grass", "sand", "water", "net", "board with number", "trees"]
+    "output_dir": "./golf_segmentation_results",
+    # 【优化项 1】强化语义描述，利用 FP32 的高精度对齐
+    "queries": [
+        "plain green grass ground",                   # 0: 草地 (调低语义强度)
+        "sand bunker",                                # 1
+        "water pond",                                 # 2
+        "protective net",                             # 3
+        "rectangular sign with number",               # 4: 码牌 (强化特征描述)
+        "dark trees"                                  # 5
+    ],
+    # 【优化项 2】决策增益 (Bias)
+    # 根据热力图表现，我们需要给码牌约 0.15 - 0.20 的“战力补偿”
+    "marker_bias": 0.00, 
+    "grass_penalty": 0.00
 }
 
-PROMPT_TEMPLATES = [
-    "a photo of a {}.", "a cropped photo of the {}.", "a close-up photo of a {}.",
-    "a bright photo of the {}.", "a dark photo of the {}."
-]
-
-class GolfCourseAnalyzer:
+class GolfResultAnalyzer:
     def __init__(self):
         self.device = "cuda"
-        print(f"🏗️  正在以 FP32 全精度加载 DINOv3 模型...")
-        # 1. 加载模型逻辑
+        print(f"🏗️  正在加载全精度 FP32 模型以保证分类准确性...")
         self.model, self.tokenizer = torch.hub.load(
             CONFIG["repo_dir"], CONFIG["model_name"], 
-            weights=CONFIG["dinotxt_w"], 
-            backbone_weights=CONFIG["backbone_w"], 
-            source='local'
+            weights=CONFIG["dinotxt_w"], backbone_weights=CONFIG["backbone_w"], source='local'
         )
-        # 2. 【核心修改】强制使用 float() 并移除 half()
-        self.model.to(self.device).float().eval() 
+        self.model.to(self.device).float().eval() # 坚持使用 Float32
         
         self.transform = TVT.Compose([
             TVT.Resize(512, interpolation=TVT.InterpolationMode.BICUBIC),
             TVT.ToTensor(),
             TVT.Normalize(mean=[0.485, 0.456, 0.406], std=[0.229, 0.224, 0.225]),
         ])
-        
         self.text_features = self._prepare_text_features()
 
     @torch.no_grad()
     def _prepare_text_features(self):
         all_feats = []
-        print("🔤 正在生成文本特征 (Float32模式)...")
+        templates = ["a photo of a {}.", "a close-up of {}.", "{} in a golf course."]
         for label in CONFIG["queries"]:
-            texts = [temp.format(label) for temp in PROMPT_TEMPLATES]
+            texts = [t.format(label) for t in templates]
             tokens = self.tokenizer.tokenize(texts).to(self.device)
-            
-            # encode_text 输出现在默认为 Float32
-            feats = self.model.encode_text(tokens).float() 
-            
-            # 切片取后半段 1024 维
-            half_dim = feats.shape[1] // 2
-            p2_feats = feats[:, half_dim:]
-            
-            # 增加 eps 防御归一化中的 nan
-            p2_feats = F.normalize(p2_feats, p=2, dim=-1, eps=1e-5)
-            mean_feat = p2_feats.mean(dim=0)
-            final_feat = F.normalize(mean_feat, p=2, dim=-1, eps=1e-5)
-            all_feats.append(final_feat)
-            
+            feats = self.model.encode_text(tokens).float()
+            # 官方 1024 维切片逻辑
+            feats = feats[:, feats.shape[1] // 2 :]
+            feats = F.normalize(feats, p=2, dim=-1, eps=1e-5)
+            all_feats.append(F.normalize(feats.mean(0), p=2, dim=-1, eps=1e-5))
         return torch.stack(all_feats)
 
     @torch.no_grad()
     def analyze_image(self, img_path):
         img_pil = Image.open(img_path).convert("RGB")
         w_orig, h_orig = img_pil.size
-        # 3. 【核心修改】输入张量保持为 float
         img_tensor = self.transform(img_pil).unsqueeze(0).to(self.device).float()
         
-        patch_h, patch_w = img_tensor.shape[2] // 16, img_tensor.shape[3] // 16
-
-        # 4. 【核心修改】彻底停用 autocast 加速块
+        # 提取视觉特征
         _, _, patch_tokens = self.model.visual_model.get_class_and_patch_tokens(img_tensor)
-        patch_tokens = F.normalize(patch_tokens.float(), p=2, dim=-1, eps=1e-5)
+        patch_tokens = F.normalize(patch_tokens.squeeze(0).float(), p=2, dim=-1, eps=1e-5)
         
-        # 计算相似度 [N, num_labels]
-        similarity = patch_tokens.squeeze(0) @ self.text_features.T
+        # 计算原始相似度
+        similarity = patch_tokens @ self.text_features.T # [N, 6]
         
-        # 找到码牌响应最强的一个 Patch 索引
-        # idx_max = similarity[:, 4].argmax()
-        # marker_score = similarity[idx_max, 4].item()
-        # grass_score = similarity[idx_max, 0].item()
+        # --- 实时分数监控 (解决全绿问题的核心) ---
+        idx_marker = 4
+        marker_max = similarity[:, idx_marker].max().item()
+        # 找到码牌响应最高点对应的草地分值
+        grass_at_marker = similarity[similarity[:, idx_marker].argmax(), 0].item()
+        
+        # 【关键日志】输出这个信息能帮你微调 bias
+        print(f"DEBUG [{os.path.basename(img_path)}] -> 码牌最高分: {marker_max:.4f} | 竞争草地分: {grass_at_marker:.4f} | 差距: {grass_at_marker - marker_max:.4f}")
 
-        # print(f"📊 目标区域对决 -> 码牌相似度: {marker_score:.4f}, 草地相似度: {grass_score:.4f}")
-        # print(f"📉 当前差距: {grass_score - marker_score:.4f}")
-        # 应用偏置并生成 Mask
+        # --- 竞争补偿逻辑 ---
         bias = torch.zeros(similarity.shape[-1], device=self.device)
-        bias[4] = 0.12 # 略微加大对 Index 4 (red color) 的补偿
+        bias[0] = CONFIG["grass_penalty"] # 压低草地
+        bias[4] = CONFIG["marker_bias"]   # 提升码牌
         
-        final_scores = (similarity + bias) * 20.0
-        mask = final_scores.argmax(dim=-1).reshape(patch_h, patch_w).cpu().numpy()
+        # 最终决策 (使用 30.0 缩放因子增强类别边界)
+        final_scores = (similarity + bias) * 30.0
+        grid_h, grid_w = img_tensor.shape[2]//16, img_tensor.shape[3]//16
+        mask = final_scores.argmax(dim=-1).reshape(grid_h, grid_w).cpu().numpy()
         
-        # 准备热力图数据
-        sim_map = similarity.reshape(1, patch_h, patch_w, -1).permute(0, 3, 1, 2)
-        sim_map_resized = F.interpolate(sim_map, size=(h_orig, w_orig), mode='bilinear').squeeze(0)
+        return mask, np.array(img_pil)
 
-        return mask, sim_map_resized.cpu().float().numpy(), np.array(img_pil)
-
-    def save_result(self, mask, sim_map, original_img, save_dir, filename):
+    def save_final_result(self, mask, original_img, save_dir, filename):
         h, w = original_img.shape[:2]
+        mask_res = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
         
-        # 处理左侧：分割叠加层
-        mask_resized = cv2.resize(mask.astype(np.uint8), (w, h), interpolation=cv2.INTER_NEAREST)
-        colors_bgr = [[0,255,0], [0,255,255], [255,0,0], [255,255,255], [255,0,255], [128,128,128]]
+        # BGR 颜色定义：0:绿(草), 4:紫(码牌)
+        colors = [[0,255,0], [0,255,255], [255,0,0], [255,255,255], [255,0,255], [128,128,128]]
         
-        bgr_img = cv2.cvtColor(original_img, cv2.COLOR_RGB2BGR)
-        seg_overlay = bgr_img.copy()
-        for i, color in enumerate(colors_bgr):
+        res_img = cv2.cvtColor(original_img, cv2.COLOR_RGB2BGR)
+        overlay = res_img.copy()
+        
+        for i, color in enumerate(colors):
             if i < len(CONFIG["queries"]):
-                region = mask_resized == i
+                region = mask_res == i
                 if np.any(region):
-                    c = np.array(color, dtype=np.uint8)
-                    seg_overlay[region] = cv2.addWeighted(seg_overlay[region], 0.5, np.full_like(seg_overlay[region], c), 0.5, 0).squeeze()
+                    overlay[region] = cv2.addWeighted(overlay[region], 0.4, np.full_like(overlay[region], color), 0.6, 0).squeeze()
         
-        # 5. 【核心修改】输出 100% 纯热力图，排除原图干扰
-        heatmap_raw = sim_map[4]
-        denom = heatmap_raw.max() - heatmap_raw.min()
-        if denom > 1e-6:
-            heatmap_norm = cv2.normalize(heatmap_raw, None, 0, 255, cv2.NORM_MINMAX).astype(np.uint8)
-        else:
-            heatmap_norm = np.zeros_like(heatmap_raw, dtype=np.uint8)
-        
-        pure_heatmap = cv2.applyColorMap(heatmap_norm, cv2.COLORMAP_JET)
-        
-        combined = np.hstack([seg_overlay, pure_heatmap])
-        cv2.imwrite(os.path.join(save_dir, f"diag_{filename}"), combined)
+        cv2.imwrite(os.path.join(save_dir, f"result_{filename}"), overlay)
 
-    def run_batch(self):
+    def run(self):
         if not os.path.exists(CONFIG["output_dir"]): os.makedirs(CONFIG["output_dir"])
-        files = sorted([f for f in os.listdir(CONFIG["input_pics"]) if f.lower().endswith(('.png', '.jpg'))])[:100]
-        for i, filename in enumerate(tqdm(files)):
-            try:
-                mask, sim_map, orig = self.analyze_image(os.path.join(CONFIG["input_pics"], filename))
-                self.save_result(mask, sim_map, orig, CONFIG["output_dir"], filename)
-            except Exception as e:
-                print(f"❌ Error {filename}: {e}")
+        files = sorted([f for f in os.listdir(CONFIG["input_pics"]) if f.lower().endswith(('.png', '.jpg'))])[:20]
+        for f in tqdm(files):
+            mask, orig = self.analyze_image(os.path.join(CONFIG["input_pics"], f))
+            self.save_final_result(mask, orig, CONFIG["output_dir"], f)
 
 if __name__ == "__main__":
-    analyzer = GolfCourseAnalyzer()
-    analyzer.run_batch()
+    analyzer = GolfResultAnalyzer()
+    analyzer.run()
