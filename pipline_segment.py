@@ -13,7 +13,7 @@ class DINOPCASegmenter:
         self.device = device
         print(f"[*] Loading {model_name}...")
         self.local_repo_dir = '/home/wayrobo/0_code/dinov3'
-        self.weights_backbone = '/home/wayrobo/0_code/dinov3/dinov3/models/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
+        self.weights_backbone = '/home/wayrobo/0_code/dinov3/pretrained/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
         self.model = torch.hub.load(self.local_repo_dir, model_name, source='local', weights=self.weights_backbone)
         self.model.to(device).eval()
         
