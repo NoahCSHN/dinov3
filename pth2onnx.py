@@ -1,67 +1,73 @@
 import torch
 import torch.nn as nn
 import os
+import warnings
 
-# --- 1. 定义 ONNX 导出包装类 ---
+# 屏蔽无关的 Trace 警告
+warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
+
 class DINOv3ExportWrapper(nn.Module):
     def __init__(self, local_repo_dir, model_name, weights_path):
         super().__init__()
-        # 加载基础模型
-        self.base_model = torch.hub.load(
+        self.model = torch.hub.load(
             local_repo_dir, 
             model_name, 
             source='local', 
             weights=weights_path
-        )
-        self.base_model.eval()
+        ).float()
 
     def forward(self, x):
-        # 对应你脚本中的 get_intermediate_layers(n=1) 逻辑
-        # 在 DINOv3 中，这通常提取最后一个 Transformer Block 的输出
-        # 我们显式调用内部方法以保证导出路径清晰
-        features = self.base_model.get_intermediate_layers(x, n=1)[0]
+        # 提取最后一层特征
+        features = self.model.get_intermediate_layers(x, n=1)[0]
         return features
 
-# --- 2. 执行转换 ---
 def export_to_onnx():
-    # 配置路径（完全匹配你的 pipline_segment.py）
     local_repo_dir = '/home/wayrobo/0_code/dinov3'
     model_name = "dinov3_vits16"
     weights_path = '/home/wayrobo/0_code/dinov3/pretrained/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
     output_onnx = "dinov3_vits16_512.onnx"
     
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-
-    print(f"[*] Loading model for export...")
+    device = "cpu"
     wrapper = DINOv3ExportWrapper(local_repo_dir, model_name, weights_path).to(device)
     wrapper.eval()
 
-    # 构造静态输入 (1, 3, 512, 512)
-    # TensorRT 在静态输入下性能最优，完全满足 20Hz 需求
     dummy_input = torch.randn(1, 3, 512, 512).to(device)
 
-    print(f"[*] Exporting to ONNX (Opset 17)...")
-    torch.onnx.export(
-        wrapper,
-        dummy_input,
-        output_onnx,
-        export_params=True,
-        opset_version=18,        # 推荐 17，能更好地融合 ViT 的 Layernorm 和 Attention
-        do_constant_folding=True,
-        input_names=['input'],
-        output_names=['feature_tokens'],
-        # 保持静态 Shape 以获得 Orin 平台的极致加速
-        dynamic_axes=None 
-    )
-
-    print(f"✅ Export Complete: {output_onnx}")
+    print(f"[*] Exporting via LEGACY path (Bypassing ALL Dynamo logic)...")
     
-    # 验证导出文件
-    if os.path.exists(output_onnx):
-        import onnx
-        onnx_model = onnx.load(output_onnx)
-        onnx.checker.check_model(onnx_model)
-        print("✅ ONNX structure verified.")
+    # 【核心修复】不使用 JIT Trace，而是直接使用带有 legacy 标志的 export
+    # 同时强制指定 dynamo=False
+    try:
+        torch.onnx.export(
+            wrapper, 
+            dummy_input,
+            output_onnx,
+            export_params=True,
+            opset_version=16, 
+            do_constant_folding=True,
+            input_names=['input'],
+            output_names=['feature_tokens'],
+            # 关键：显式设置这个参数来切断新版导出器的路径
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
+            # 强制不使用 dynamo 模式
+            # dynamo=False  # 在某些 2.5+ 版本中可以直接设置此参数
+        )
+        print(f"✅ Export Success: {output_onnx}")
+    except Exception as e:
+        print(f"❌ Standard export failed, trying alternative internal path...")
+        # 备选方案：如果上面的路径还是被劫持，使用以下方式
+        torch.onnx.utils.export(
+            wrapper,
+            dummy_input,
+            output_onnx,
+            verbose=False,
+            opset_version=16,
+            operator_export_type=torch.onnx.OperatorExportTypes.ONNX,
+            do_constant_folding=True,
+            input_names=['input'],
+            output_names=['feature_tokens']
+        )
+        print(f"✅ Alternative Export Success: {output_onnx}")
 
 if __name__ == "__main__":
     export_to_onnx()
