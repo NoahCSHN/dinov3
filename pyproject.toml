@@ -3,7 +3,7 @@ name = "Noah"
 version = "0.1.0"
 description = "Research on DINOv3"
 readme = "ReadMe.md"
-requires-python = ">=3.10"
+requires-python = "==3.11.14"
 dependencies = [
     "ftfy",
     "fvcore>=0.1.5.post20221221",
@@ -11,6 +11,8 @@ dependencies = [
     "numpy>=2.2.6",
     "nvidia-cusolver-cu12==11.7.3.90",
     "omegaconf",
+    "onnx>=1.20.1",
+    "onnxscript>=0.5.7",
     "opencv-python-headless>=4.13.0.90",
     "pandas>=2.3.3",
     "pillow>=12.1.0",
