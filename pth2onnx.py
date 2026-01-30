@@ -2,6 +2,8 @@ import torch
 import torch.nn as nn
 import os
 import warnings
+import onnx
+from onnxsim import simplify
 
 # 屏蔽无关的 Trace 警告
 warnings.filterwarnings("ignore", category=torch.jit.TracerWarning)
@@ -26,6 +28,7 @@ def export_to_onnx():
     model_name = "dinov3_vits16"
     weights_path = '/home/wayrobo/0_code/dinov3/pretrained/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
     output_onnx = "dinov3_vits16_512.onnx"
+    output_onnx_simplified = "dinov3_vits16_512_simplified.onnx"
     
     device = "cpu"
     wrapper = DINOv3ExportWrapper(local_repo_dir, model_name, weights_path).to(device)
@@ -68,6 +71,17 @@ def export_to_onnx():
             output_names=['feature_tokens']
         )
         print(f"✅ Alternative Export Success: {output_onnx}")
+
+
+    onnx_model = onnx.load(output_onnx)
+    # 使用 onnxsim 消除动态控制流节点 (如 If, Loop)
+    model_simp, check = simplify(onnx_model)
+
+    if check:
+        onnx.save(model_simp, output_onnx_simplified)
+        print("✅ ONNX 模型已成功简化，动态 If 节点已折叠！")
+    else:
+        print("❌ 简化失败，请检查模型结构。")
 
 if __name__ == "__main__":
     export_to_onnx()
