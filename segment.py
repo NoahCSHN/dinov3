@@ -10,9 +10,9 @@ import numpy as np
 device = "cuda" if torch.cuda.is_available() else "cpu"
 local_repo_dir = '/home/wayrobo/0_code/dinov3'
 convnext_weights = '/home/wayrobo/0_code/dinov3/dinov3/models/dinov3_convnext_tiny_pretrain_lvd1689m-21b726bb.pth'
-vits_weights = '/home/wayrobo/0_code/dinov3/dinov3/models/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
-# model = torch.hub.load(local_repo_dir, 'dinov3_convnext_tiny', source='local', weights=convnext_weights)
-model = torch.hub.load(local_repo_dir, 'dinov3_vits16', source='local', weights=vits_weights)
+# vits_weights = '/home/wayrobo/0_code/dinov3/dinov3/models/dinov3_vits16_pretrain_lvd1689m-08c60483.pth'
+model = torch.hub.load(local_repo_dir, 'dinov3_convnext_tiny', source='local', weights=convnext_weights)
+# model = torch.hub.load(local_repo_dir, 'dinov3_vits16', source='local', weights=vits_weights)
 model.to(device).eval()
 
 # 2. 图像预处理
