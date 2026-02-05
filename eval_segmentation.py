@@ -133,12 +133,12 @@ def evaluate():
     pixel_acc, miou, per_class_iou = metric_logger.compute()
     
     # 打印报告
-    VOC_CLASSES = [
-        'background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 
-        'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 
-        'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 
-        'sofa', 'train', 'tvmonitor'
-    ]
+    #VOC_CLASSES = [
+    #    'background', 'aeroplane', 'bicycle', 'bird', 'boat', 'bottle', 
+    #    'bus', 'car', 'cat', 'chair', 'cow', 'diningtable', 'dog', 
+    #    'horse', 'motorbike', 'person', 'pottedplant', 'sheep', 
+    #    'sofa', 'train', 'tvmonitor'
+    #]
 
     print("\n" + "="*40)
     print(f"📊 验证结果报告")
